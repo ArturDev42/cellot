@@ -52,50 +52,19 @@ def read_list(arg):
     return list(lst)
 
 
-def read_single_anndata(config, path=None):
-    if path is None:
-        path = config.data.path
+def read_single_anndata(config: str) -> anndata.AnnData:
+    """## Reads anndata file that is used in load_cell_data() which creates a dataloader that is
+    used to train the model. We use this function instead of the function from the cellot authors,
+    because we do our own data pre-processing and provide the already pre-processed file to cellot.
+    If no other functions in the cellot codebase are changed, cellot expects the anndata file to
+    have a column called 'split' containing train/test/val and a column called 'transport' containing
+    the label 'source' for control and the label 'target' for perturbations.
 
+    ### Args:
+        - `config (yaml)`: Contains the path to the anndata file.
+    """
+    path = data.config.path
     data = anndata.read(path)
-
-    if "features" in config.data:
-        features = read_list(config.data.features)
-        data = data[:, features].copy()
-
-    # select subgroup of individuals
-    if "individuals" in config.data:
-        data = data[
-            data.obs[config.data.individuals[0]].isin(config.data.individuals[1])
-        ]
-
-    # label conditions as source/target distributions
-    # config.data.{source,target} can be a list now
-    transport_mapper = dict()
-    for value in ["source", "target"]:
-        key = config.data[value]
-        if isinstance(key, list):
-            for item in key:
-                transport_mapper[item] = value
-        else:
-            transport_mapper[key] = value
-
-    data.obs["transport"] = data.obs[config.data.condition].apply(transport_mapper.get)
-
-    if config.data["target"] == "all":
-        data.obs["transport"].fillna("target", inplace=True)
-
-    mask = data.obs["transport"].notna()
-    assert "subset" not in config.data
-    if "subset" in config.datasplit:
-        for key, value in config.datasplit.subset.items():
-            if not isinstance(value, list):
-                value = [value]
-            mask = mask & data.obs[key].isin(value)
-
-    # write train/test/valid into split column
-    data = data[mask].copy()
-    if "datasplit" in config:
-        data.obs["split"] = split_cell_data(data, **config.datasplit)
 
     return data
 
@@ -194,8 +163,11 @@ def load_cell_data(
             if pair_batch_on is not None:
                 split_on.append(pair_batch_on)
 
-        elif (config.model.name == "scgen" or config.model.name == "cae"
-              or config.model.name == "popalign"):
+        elif (
+            config.model.name == "scgen"
+            or config.model.name == "cae"
+            or config.model.name == "popalign"
+        ):
             split_on = ["split"]
 
         else:
@@ -247,109 +219,3 @@ def load_cell_data(
         return returns[0]
 
     return tuple(returns)
-
-
-def split_cell_data_train_test(
-    data, groupby=None, random_state=0, holdout=None, subset=None, **kwargs
-):
-
-    split = pd.Series(None, index=data.obs.index, dtype=object)
-    groups = {None: data.obs.index}
-    if groupby is not None:
-        groups = data.obs.groupby(groupby).groups
-
-    for key, index in groups.items():
-        trainobs, testobs = train_test_split(index, random_state=random_state, **kwargs)
-        split.loc[trainobs] = "train"
-        split.loc[testobs] = "test"
-
-    if holdout is not None:
-        for key, value in holdout.items():
-            if not isinstance(value, list):
-                value = [value]
-            split.loc[data.obs[key].isin(value)] = "ood"
-
-    return split
-
-
-def split_cell_data_train_test_eval(
-    data,
-    test_size=0.15,
-    eval_size=0.15,
-    groupby=None,
-    random_state=0,
-    holdout=None,
-    **kwargs
-):
-
-    split = pd.Series(None, index=data.obs.index, dtype=object)
-
-    if holdout is not None:
-        for key, value in holdout.items():
-            if not isinstance(value, list):
-                value = [value]
-            split.loc[data.obs[key].isin(value)] = "ood"
-
-    groups = {None: data.obs.loc[split != "ood"].index}
-    if groupby is not None:
-        groups = data.obs.loc[split != "ood"].groupby(groupby).groups
-
-    for key, index in groups.items():
-        training, evalobs = train_test_split(
-            index, random_state=random_state, test_size=eval_size
-        )
-
-        trainobs, testobs = train_test_split(
-            training, random_state=random_state, test_size=test_size
-        )
-
-        split.loc[trainobs] = "train"
-        split.loc[testobs] = "test"
-        split.loc[evalobs] = "eval"
-
-    return split
-
-
-def split_cell_data_toggle_ood(data, holdout, key, mode, random_state=0, **kwargs):
-
-    """Hold out ood sample, coordinated with iid split
-
-    ood sample defined with key, value pair
-
-    for ood mode: hold out all cells from a sample
-    for iid mode: include half of cells in split
-    """
-
-    split = split_cell_data_train_test(data, random_state=random_state, **kwargs)
-
-    if not isinstance(holdout, list):
-        value = [holdout]
-
-    ood = data.obs_names[data.obs[key].isin(value)]
-    trainobs, testobs = train_test_split(ood, random_state=random_state, test_size=0.5)
-
-    if mode == "ood":
-        split.loc[trainobs] = "ignore"
-        split.loc[testobs] = "ood"
-
-    elif mode == "iid":
-        split.loc[trainobs] = "train"
-        split.loc[testobs] = "ood"
-
-    else:
-        raise ValueError
-
-    return split
-
-
-def split_cell_data(data, name="train_test", **kwargs):
-    if name == "train_test":
-        split = split_cell_data_train_test(data, **kwargs)
-    elif name == "toggle_ood":
-        split = split_cell_data_toggle_ood(data, **kwargs)
-    elif name == "train_test_eval":
-        split = split_cell_data_train_test_eval(data, **kwargs)
-    else:
-        raise ValueError
-
-    return split.astype("category")
